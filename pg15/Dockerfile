@@ -1,4 +1,4 @@
-ARG PG_VERSION=15.6
+ARG PG_VERSION=15.7
 ARG PG_MAJOR_VERSION=15
 ARG VERSION=custom
 
@@ -19,7 +19,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -v -o /fly/bin/start ./cmd/start
 COPY ./bin/* /fly/bin/
 
 FROM wrouesnel/postgres_exporter:latest AS postgres_exporter
-
 FROM postgres:${PG_VERSION}
 ENV PGDATA=/data/postgresql
 ENV PGPASSFILE=/data/.pgpass
@@ -36,7 +35,7 @@ LABEL fly.pg-version=${PG_VERSION}
 LABEL fly.pg-manager=repmgr
 
 RUN apt-get update && apt-get install --no-install-recommends -y \
-    ca-certificates iproute2 curl bash dnsutils vim haproxy socat procps ssh gnupg rsync barman-cli barman barman-cli-cloud cron \
+    ca-certificates iproute2 curl bash dnsutils vim socat procps ssh gnupg rsync barman-cli barman barman-cli-cloud cron \
     && apt autoremove -y
 
 # Repmgr
@@ -46,16 +45,10 @@ RUN apt-get update && \
     apt-get install -y ./postgresql-${PG_MAJOR_VERSION}-repmgr_5.3.3-2_amd64.deb \
     && rm ./postgresql-${PG_MAJOR_VERSION}-repmgr_5.3.3-2_amd64.deb
 
-RUN echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(cat /etc/os-release | grep VERSION_CODENAME | cut -d'=' -f2) main" > /etc/apt/sources.list.d/timescaledb.list \
-    && curl -L https://packagecloud.io/timescale/timescaledb/gpgkey | apt-key add -
-
-# TimescaleDB and PostGIS
+# PostGIS
 RUN apt-get update && apt-get install --no-install-recommends -y \
-    postgresql-$PG_MAJOR_VERSION-postgis-$POSTGIS_MAJOR \
-    postgresql-$PG_MAJOR_VERSION-postgis-$POSTGIS_MAJOR-scripts \
-    timescaledb-2-postgresql-$PG_MAJOR_VERSION \
-    timescaledb-toolkit-postgresql-$PG_MAJOR_VERSION \
-    && apt autoremove -y
+    postgresql-$PG_MAJOR-postgis-$POSTGIS_MAJOR \
+    postgresql-$PG_MAJOR-postgis-$POSTGIS_MAJOR-scripts
 
 # Haproxy
 RUN curl https://haproxy.debian.net/bernat.debian.org.gpg \
@@ -73,13 +66,9 @@ COPY --from=0 /fly/bin/* /usr/local/bin
 COPY --from=postgres_exporter /postgres_exporter /usr/local/bin/
 
 ADD /config/* /fly/
-
 RUN mkdir -p /run/haproxy/
 RUN usermod -d /data postgres
 
-ENV TIMESCALEDB_ENABLED=true
-
 EXPOSE 5432
-
 
 CMD ["start"]

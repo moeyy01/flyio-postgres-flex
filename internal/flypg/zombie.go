@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"os"
 
 	"github.com/fly-apps/postgres-flex/internal/utils"
@@ -32,7 +31,7 @@ func ZombieLockExists() bool {
 }
 
 func writeZombieLock(hostname string) error {
-	if err := os.WriteFile(zombieLockFile, []byte(hostname), 0600); err != nil {
+	if err := os.WriteFile(zombieLockFile, []byte(hostname), 0o600); err != nil {
 		return err
 	}
 
@@ -85,7 +84,7 @@ type DNASample struct {
 
 func TakeDNASample(ctx context.Context, node *Node, standbys []Member) (*DNASample, error) {
 	sample := &DNASample{
-		hostname:       node.PrivateIP,
+		hostname:       node.Hostname(),
 		totalMembers:   len(standbys) + 1,
 		totalActive:    1,
 		totalInactive:  0,
@@ -117,8 +116,8 @@ func TakeDNASample(ctx context.Context, node *Node, standbys []Member) (*DNASamp
 
 		sample.totalActive++
 
-		// Record conflict when primary doesn't match.
-		if primary.Hostname != node.PrivateIP {
+		// Record conflict when primary name does not match our machine ID
+		if primary.Hostname != node.Hostname() && primary.Hostname != node.PrivateIP {
 			sample.totalConflicts++
 			sample.conflictMap[primary.Hostname]++
 		}
@@ -158,6 +157,7 @@ func ZombieDiagnosis(s *DNASample) (string, error) {
 		if s.totalConflicts > 0 {
 			return "", ErrZombieDiagnosisUndecided
 		}
+
 		return s.hostname, nil
 	}
 
@@ -199,24 +199,19 @@ func handleZombieLock(ctx context.Context, n *Node) error {
 	// If the zombie lock contains a hostname, it means we were able to
 	// resolve the real primary and will attempt to rejoin it.
 	if primaryStr != "" {
-		ip := net.ParseIP(primaryStr)
-		if ip == nil {
-			return fmt.Errorf("zombie.lock file contains an invalid ipv6 address")
-		}
-
-		conn, err := n.RepMgr.NewRemoteConnection(ctx, ip.String())
+		conn, err := n.RepMgr.NewRemoteConnection(ctx, primaryStr)
 		if err != nil {
-			return fmt.Errorf("failed to establish a connection to our rejoin target %s: %s", ip.String(), err)
+			return fmt.Errorf("failed to establish a connection to our rejoin target %s: %s", primaryStr, err)
 		}
 		defer func() { _ = conn.Close(ctx) }()
 
 		primary, err := n.RepMgr.PrimaryMember(ctx, conn)
 		if err != nil {
-			return fmt.Errorf("failed to confirm primary on recover target %s: %s", ip.String(), err)
+			return fmt.Errorf("failed to confirm primary on recover target %s: %s", primaryStr, err)
 		}
 
 		// Confirm that our rejoin target still identifies itself as the primary.
-		if primary.Hostname != ip.String() {
+		if primary.Hostname != primaryStr {
 			// Clear the zombie.lock file so we can attempt to re-resolve the correct primary.
 			if err := RemoveZombieLock(); err != nil {
 				return fmt.Errorf("failed to remove zombie lock: %s", err)
@@ -250,6 +245,7 @@ func handleZombieLock(ctx context.Context, n *Node) error {
 		// TODO - Provide link to documentation on how to address this
 		log.Println("[WARN] Zombie lock file does not contain a hostname.")
 		log.Println("[WARN] This likely means that we were unable to determine who the real primary is.")
+		log.Println("[WARN] If a new primary has been established, consider adding a new replica with `fly machines clone <primary-machine-id>` and then remove this member.")
 	}
 
 	return nil
@@ -262,6 +258,7 @@ func EvaluateClusterState(ctx context.Context, conn *pgx.Conn, node *Node) error
 			return fmt.Errorf("failed to quarantine failed primary: %s", err)
 		}
 		log.Println("[WARN] Primary is going read-only to protect against potential split-brain")
+
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("failed to run zombie diagnosis: %s", err)

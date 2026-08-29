@@ -1,3 +1,4 @@
+// Package admin provides administrative utilities for managing postgres.
 package admin
 
 import (
@@ -24,6 +25,7 @@ func GrantSuperuser(ctx context.Context, pg *pgx.Conn, username string) error {
 	sql := fmt.Sprintf("ALTER USER %s WITH SUPERUSER;", username)
 
 	_, err := pg.Exec(ctx, sql)
+
 	return err
 }
 
@@ -69,6 +71,7 @@ func ChangePassword(ctx context.Context, pg *pgx.Conn, username, password string
 	sql := fmt.Sprintf("ALTER USER %s WITH LOGIN PASSWORD '%s';", username, password)
 
 	_, err := pg.Exec(ctx, sql)
+
 	return err
 }
 
@@ -100,6 +103,7 @@ func CreateDatabase(ctx context.Context, pg *pgx.Conn, name string) error {
 
 	sql := fmt.Sprintf("CREATE DATABASE %s;", name)
 	_, err = pg.Exec(ctx, sql)
+
 	return err
 }
 
@@ -128,6 +132,18 @@ type ReplicationSlot struct {
 	Active             bool
 	WalStatus          string
 	RetainedWalInBytes int
+}
+
+func GetReplicationSlot(ctx context.Context, pg *pgx.Conn, slotName string) (*ReplicationSlot, error) {
+	sql := fmt.Sprintf("SELECT slot_name, active, wal_status, pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) AS retained_wal FROM pg_replication_slots where slot_name = '%s';", slotName)
+	row := pg.QueryRow(ctx, sql)
+
+	var slot ReplicationSlot
+	if err := row.Scan(&slot.Name, &slot.Active, &slot.WalStatus, &slot.RetainedWalInBytes); err != nil {
+		return nil, err
+	}
+
+	return &slot, nil
 }
 
 func ListReplicationSlots(ctx context.Context, pg *pgx.Conn) ([]ReplicationSlot, error) {
@@ -167,7 +183,6 @@ func ListReplicationSlots(ctx context.Context, pg *pgx.Conn) ([]ReplicationSlot,
 
 func DropReplicationSlot(ctx context.Context, pg *pgx.Conn, name string) error {
 	sql := fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", name)
-
 	_, err := pg.Exec(ctx, sql)
 	if err != nil {
 		return err
@@ -315,7 +330,7 @@ func DropOwned(ctx context.Context, conn *pgx.Conn, user string) error {
 	return nil
 }
 
-func SetConfigurationSetting(ctx context.Context, conn *pgx.Conn, key string, value interface{}) error {
+func SetConfigurationSetting(ctx context.Context, conn *pgx.Conn, key string, value any) error {
 	sql := fmt.Sprintf("SET %s to %s", key, value)
 	_, err := conn.Exec(ctx, sql)
 	return err
@@ -325,6 +340,7 @@ func ReloadPostgresConfig(ctx context.Context, pg *pgx.Conn) error {
 	sql := "SELECT pg_reload_conf()"
 
 	_, err := pg.Exec(ctx, sql)
+
 	return err
 }
 
@@ -334,6 +350,7 @@ func SettingExists(ctx context.Context, pg *pgx.Conn, setting string) (bool, err
 	if err := pg.QueryRow(ctx, sql).Scan(&out); err != nil {
 		return false, err
 	}
+
 	return out, nil
 }
 
@@ -343,6 +360,7 @@ func ExtensionAvailable(ctx context.Context, pg *pgx.Conn, extension string) (bo
 	if err := pg.QueryRow(ctx, sql).Scan(&out); err != nil {
 		return false, err
 	}
+
 	return out, nil
 }
 
@@ -353,6 +371,7 @@ func SettingRequiresRestart(ctx context.Context, pg *pgx.Conn, setting string) (
 	if err := row.Scan(&out); err != nil {
 		return false, err
 	}
+
 	return out, nil
 }
 
@@ -377,10 +396,11 @@ func GetSetting(ctx context.Context, pg *pgx.Conn, setting string) (*PGSetting, 
 	if err := row.Scan(&out.Name, &out.Setting, &out.VarType, &out.MinVal, &out.MaxVal, &out.EnumVals, &out.Context, &out.Unit, &out.Desc, &out.PendingRestart); err != nil {
 		return nil, err
 	}
+
 	return &out, nil
 }
 
-func ValidatePGSettings(ctx context.Context, conn *pgx.Conn, requested map[string]interface{}) error {
+func ValidatePGSettings(ctx context.Context, conn *pgx.Conn, requested map[string]any) error {
 	for k, v := range requested {
 		exists, err := SettingExists(ctx, conn, k)
 		if err != nil {
@@ -393,8 +413,8 @@ func ValidatePGSettings(ctx context.Context, conn *pgx.Conn, requested map[strin
 		// Verify specified extensions are installed
 		if k == "shared_preload_libraries" {
 			extensions := strings.Trim(v.(string), "'")
-			extSlice := strings.Split(extensions, ",")
-			for _, e := range extSlice {
+			extSlice := strings.SplitSeq(extensions, ",")
+			for e := range extSlice {
 				available, err := ExtensionAvailable(ctx, conn, e)
 				if err != nil {
 					return fmt.Errorf("failed to verify pg extension %s: %s", e, err)

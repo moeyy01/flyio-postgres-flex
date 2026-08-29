@@ -1,9 +1,11 @@
+// Package supervisor manages the lifecycle of supervised processes.
 package supervisor
 
 import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -54,19 +56,22 @@ func (m *multiOutput) PipeOutput(proc *process) {
 	pipe := m.openPipe(proc)
 
 	go func(proc *process, pipe *ptyPipe) {
-		scanner := bufio.NewScanner(pipe.pty)
+		reader := bufio.NewReader(pipe.pty)
+		for {
+			line, err := reader.ReadBytes('\n')
+			// Only write non-empty lines.
+			if len(line) > 0 {
+				m.WriteLine(proc, line)
+			}
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("reader error: %v", err)
+				}
 
-		for scanner.Scan() {
-			m.WriteLine(proc, scanner.Bytes())
+				break
+			}
 		}
 	}(proc, pipe)
-}
-
-func (m *multiOutput) ClosePipe(proc *process) {
-	if pipe := m.pipes[proc]; pipe != nil {
-		_ = pipe.pty.Close()
-		_ = pipe.tty.Close()
-	}
 }
 
 func (m *multiOutput) WriteLine(proc *process, p []byte) {
@@ -83,6 +88,8 @@ func (m *multiOutput) WriteLine(proc *process, p []byte) {
 
 	buf.WriteString("\033[0m | ")
 
+	// remove trailing newline if present.
+	p = bytes.TrimSuffix(p, []byte("\n"))
 	buf.Write(p)
 	buf.WriteByte('\n')
 
@@ -95,8 +102,14 @@ func (m *multiOutput) WriteLine(proc *process, p []byte) {
 	}
 }
 
+func (m *multiOutput) ClosePipe(proc *process) {
+	if pipe := m.pipes[proc]; pipe != nil {
+		_ = pipe.pty.Close()
+		_ = pipe.tty.Close()
+	}
+}
+
 func (m *multiOutput) WriteErr(proc *process, err error) {
-	m.WriteLine(proc, []byte(
-		fmt.Sprintf("\033[0;31m%v\033[0m", err),
-	))
+	m.WriteLine(proc,
+		fmt.Appendf(nil, "\033[0;31m%v\033[0m", err))
 }

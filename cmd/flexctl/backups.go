@@ -12,7 +12,13 @@ import (
 	"github.com/fly-apps/postgres-flex/internal/flypg"
 	"github.com/fly-apps/postgres-flex/internal/flypg/state"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
+)
+
+const (
+	barmanCloudMetadataTimeout = 5 * time.Minute
+	barmanCloudBackupTimeout   = 1 * time.Hour
 )
 
 var backupListCmd = &cobra.Command{
@@ -57,6 +63,7 @@ var backupShowCmd = &cobra.Command{
 		if !backupsEnabled() {
 			return fmt.Errorf("backups are not enabled")
 		}
+
 		return showBackup(cmd, args)
 	},
 	Args: cobra.ExactArgs(1),
@@ -65,7 +72,7 @@ var backupShowCmd = &cobra.Command{
 func showBackup(cmd *cobra.Command, args []string) error {
 	id := args[0]
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), barmanCloudMetadataTimeout)
 	defer cancel()
 
 	store, err := state.NewStore()
@@ -89,7 +96,7 @@ func showBackup(cmd *cobra.Command, args []string) error {
 }
 
 func createBackup(cmd *cobra.Command) error {
-	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(cmd.Context(), barmanCloudBackupTimeout)
 	defer cancel()
 
 	n, err := flypg.NewNode()
@@ -147,7 +154,7 @@ func createBackup(cmd *cobra.Command) error {
 }
 
 func listBackups(cmd *cobra.Command) error {
-	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), barmanCloudMetadataTimeout)
 	defer cancel()
 
 	store, err := state.NewStore()
@@ -166,12 +173,13 @@ func listBackups(cmd *cobra.Command) error {
 	}
 
 	if isJSON {
-		jsonBytes, err := barman.ListRawBackups(cmd.Context())
+		jsonBytes, err := barman.ListRawBackups(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to list backups: %v", err)
 		}
 
 		fmt.Println(string(jsonBytes))
+
 		return nil
 	}
 
@@ -192,34 +200,32 @@ func listBackups(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to get status flag: %v", err)
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"ID/Name", "Alias", "Status", "End time", "Begin WAL"})
-
-	// Set table alignment, borders, padding, etc. as needed
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetBorder(true) // Set to false to hide borders
-	table.SetCenterSeparator("|")
-	table.SetColumnSeparator("|")
-	table.SetRowSeparator("-")
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetHeaderLine(true) // Enable header line
-	table.SetAutoWrapText(false)
+	table := tablewriter.NewTable(os.Stdout,
+		tablewriter.WithRowAlignment(tw.AlignLeft),
+		tablewriter.WithHeaderAlignment(tw.AlignLeft),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+	)
+	table.Header("ID/Name", "Alias", "Status", "End time", "Begin WAL")
 
 	for _, b := range backupList.Backups {
 		if filterStatus != "" && b.Status != filterStatus {
 			continue
 		}
 
-		table.Append([]string{
+		if err := table.Append([]string{
 			b.ID,
 			b.Name,
 			b.Status,
 			b.EndTime,
 			b.BeginWal,
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to append row: %v", err)
+		}
 	}
 
-	table.Render()
+	if err := table.Render(); err != nil {
+		return fmt.Errorf("failed to render table: %v", err)
+	}
 
 	return nil
 }
@@ -229,7 +235,7 @@ func backupsEnabled() bool {
 }
 
 func newBackupConfig() *cobra.Command {
-	var cmd = &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage backup configuration",
 	}
@@ -248,20 +254,22 @@ func getAppName() (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("FLY_APP_NAME is not set")
 	}
+
 	return name, nil
 }
 
-func getApiUrl() (string, error) {
+func getAPIURL() (string, error) {
 	hostname, err := getAppName()
 	if err != nil {
 		return "", err
 	}
 	url := fmt.Sprintf("http://%s.internal:5500", hostname)
+
 	return url, nil
 }
 
 func newConfigShow() *cobra.Command {
-	var cmd = &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Show current configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -269,7 +277,7 @@ func newConfigShow() *cobra.Command {
 				return fmt.Errorf("backups are not enabled")
 			}
 
-			url, err := getApiUrl()
+			url, err := getAPIURL()
 			if err != nil {
 				return err
 			}
@@ -279,6 +287,7 @@ func newConfigShow() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer resp.Body.Close() // nolint:errcheck
 
 			var rv configShowResult
 			if err := json.NewDecoder(resp.Body).Decode(&rv); err != nil {
@@ -303,12 +312,12 @@ type successfulUpdateResult struct {
 }
 
 type configUpdateResult struct {
-	Result successfulUpdateResult `json:"result,omitempty"`
+	Result successfulUpdateResult `json:"result"`
 	Error  string                 `json:"error,omitempty"`
 }
 
 func newConfigUpdate() *cobra.Command {
-	var cmd = &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update configuration",
 	}
@@ -350,7 +359,7 @@ func newConfigUpdate() *cobra.Command {
 			return err
 		}
 
-		url, err := getApiUrl()
+		url, err := getAPIURL()
 		if err != nil {
 			return err
 		}
@@ -360,6 +369,7 @@ func newConfigUpdate() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		defer resp.Body.Close() // nolint:errcheck
 
 		var rv configUpdateResult
 		if err := json.NewDecoder(resp.Body).Decode(&rv); err != nil {
